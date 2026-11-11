@@ -1,6 +1,15 @@
 ---
 name: keyword-openers
-description: One finished product video in, one version per keyword out. Replaces only the picture of the first seconds with a scene that matches a search keyword, puts the keyword on screen, and keeps the video's own soundtrack untouched, so each version is the same length and never sounds like two clips glued together. With the Genrupt MCP connected it writes the opening scenes, generates them (about 5 seconds each), swaps them in, checks every file and builds a review page. Use when a seller has a product video and wants a version per keyword for Sponsored Brands video or any keyword-targeted video ad. Triggers: "keyword openers", "a video per keyword", "video for each keyword", "match my video to my keywords", "change the opening of my video", "PPC video variants", "sponsored brands video per keyword", "/keyword-openers". NOT for making the full product video itself: the seller brings a finished video.
+description: >
+  One finished product video in, one version per keyword out. Replaces only the picture of the first seconds
+  with a scene that matches a search keyword, puts the keyword on screen, and keeps the video's own soundtrack
+  untouched, so each version is the same length and never sounds like two clips glued together. With the Genrupt
+  MCP connected it writes the opening scenes, generates them (about 5 seconds each), swaps them in, checks every
+  file and builds a review page. Use when a seller has a product video and wants a version per keyword for
+  Sponsored Brands video or any keyword-targeted video ad. Triggers: "keyword openers", "a video per keyword",
+  "video for each keyword", "match my video to my keywords", "change the opening of my video", "PPC video
+  variants", "sponsored brands video per keyword", "/keyword-openers". NOT for making the full product video
+  itself: the seller brings a finished video.
 ---
 
 # Keyword openers
