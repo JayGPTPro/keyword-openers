@@ -192,7 +192,7 @@ def hex_rgb(h):
 
 def render(keyword, outdir, size, frames, style="pop", face="bold",
            accent=(216, 168, 72), ink_cap=233, hold_out=0.55, fps=24.0, emphasis=(),
-           place=None):
+           place=None, scale=1.0):
     """Draws the title. Returns the second the title lands on (the loud styles),
     or None (the quiet ones)."""
     W, H = size
@@ -203,7 +203,7 @@ def render(keyword, outdir, size, frames, style="pop", face="bold",
     if style in captions.STYLES:
         return captions.STYLES[style](keyword.split(), emphasis, outdir, W, H, float(fps),
                                       frames, tp.path, accent,
-                                      **({"place": place} if place else {}))
+                                      scale=scale, **({"place": place} if place else {}))
     ink = (242, 242, 239)
     lum = .2126 * ink[0] + .7152 * ink[1] + .0722 * ink[2]
     if lum > ink_cap:

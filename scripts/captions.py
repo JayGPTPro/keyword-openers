@@ -19,7 +19,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
-START = 0.22        # nothing moves before this: let the picture register first
+START = 0.08        # the title starts almost at once: a shopper scrolling past gives it under a second
 WORD_GAP = 0.09     # between one word's pop and the next
 POP = 0.14          # one word's pop: 0.80 -> 1.06 -> 1.00
 BAR = 0.20          # the highlighter wipe
@@ -72,14 +72,18 @@ def paste(canvas, im, cx, cy, scale=1.0, alpha=1.0):
 
 
 def fit(path, text, max_w, start, floor, stroke_ratio=0.0):
+    """The largest size at which the line fits. `floor` is where it stops being
+    easy to read; a line still too wide there keeps shrinking, because a small
+    title is a note for the seller and a title cut off by the frame is a defect."""
     size = int(start)
-    while size > floor:
+    hard = max(10, int(floor * 0.4))
+    while size > hard:
         f = ImageFont.truetype(path, size)
         bb = f.getbbox(text, stroke_width=int(size * stroke_ratio))
         if bb[2] - bb[0] <= max_w:
             return f
-        size -= 2
-    return ImageFont.truetype(path, int(floor))
+        size -= 2 if size > floor else 1
+    return ImageFont.truetype(path, hard)
 
 
 def split(words, emph):
@@ -96,10 +100,13 @@ def split(words, emph):
             return [(words, True)]
         half = len(words) // 2  # nothing tells the words apart: mark the first half, where a keyword's subject usually is
         return [(words[:half], True), (words[half:], False)]
-    # emphasis in the middle: keep the order, mark the line that holds it
+    # emphasis in the middle, or at both ends: keep the order, mark the line that holds most of it
     cut = idx[-1] + 1 if idx[-1] < len(words) - 1 else idx[0]
+    if not 0 < cut < len(words):
+        cut = max(1, len(words) // 2)
     a, b = words[:cut], words[cut:]
-    return [(a, any(w.lower() in emph for w in a)), (b, any(w.lower() in emph for w in b))]
+    na, nb = (sum(w.lower() in emph for w in part) for part in (a, b))
+    return [(a, na >= nb and na > 0), (b, nb > na)]
 
 
 def soft_shadow(canvas, radius, strength=0.55):
@@ -119,21 +126,41 @@ def exit_state(t, dur):
     return 1.0 - 0.14 * u, 1.0 - u
 
 
+def spot(place, default):
+    """'top-left' -> ('top', 'left'); 'bottom' -> ('bottom', 'center')."""
+    band, _, side = (place or default).partition("-")
+    return band or default, side or "center"
+
+
+def anchor_x(W, width, side):
+    """The centre of a title of this width, set to the left, the middle or the right."""
+    m = int(W * 0.045)
+    if side == "left":
+        return m + width / 2
+    if side == "right":
+        return W - m - width / 2
+    return W / 2
+
+
 # ---------------------------------------------------------------------- pop
 
-def render_pop(words, emph, outdir, W, H, fps, frames, font_path, accent, place="bottom"):
-    s = min(W, H) / 720
+def render_pop(words, emph, outdir, W, H, fps, frames, font_path, accent, place="bottom", scale=1.0):
+    band, side = spot(place, "bottom")
+    k = min(1.0, max(0.5, float(scale)))   # a smaller title, for a shot with no calm band its full size
+    s = min(W, H) / 720 * k
     tall = H > W
     lines = split([w.upper() for w in words], {e.lower() for e in emph})
     bar_col = readable(accent)
 
     built = []
     for ws, is_e in lines:
+        if not ws:
+            continue
         text = " ".join(ws)
         if is_e:
-            f = fit(font_path, text, W * (0.80 if tall else 0.62), 136 * s, 40 * s)
+            f = fit(font_path, text, W * (0.80 if tall else 0.62) * k, 136 * s, 40 * s)
         else:
-            f = fit(font_path, text, W * (0.78 if tall else 0.52), 84 * s, 30 * s, 0.11)
+            f = fit(font_path, text, W * (0.78 if tall else 0.52) * k, 84 * s, 30 * s, 0.11)
         built.append({"words": ws, "emph": is_e, "font": f, "text": text})
 
     gap = int(14 * s)
@@ -145,8 +172,18 @@ def render_pop(words, emph, outdir, W, H, fps, frames, font_path, accent, place=
         heights.append(b["h"])
     block = sum(heights) + gap * (len(built) - 1)
     y = int(H * (0.80 if tall else 0.86)) - block
-    if place == "top":
+    if band == "top":
         y = int(H * (0.12 if tall else 0.09))
+    # how wide the whole title is, so it can sit left or right as one block
+    widest = 0
+    for b in built:
+        f = b["font"]
+        if b["emph"]:
+            wd = f.getlength(b["text"]) + 2 * int(b["cap"] * 0.36) + 16
+        else:
+            wd = f.getlength(b["text"]) + 2 * max(3, int(f.size * 0.11)) + 8
+        widest = max(widest, wd)
+    cx0 = anchor_x(W, widest, side)
     t = START
     for b in built:
         b["cy"] = y + b["h"] // 2
@@ -170,7 +207,7 @@ def render_pop(words, emph, outdir, W, H, fps, frames, font_path, accent, place=
             tiles = [tile(w, f, WHITE, stroke) for w in b["words"]]
             widths = [f.getlength(w) for w in b["words"]]
             total = sum(widths) + space * (len(widths) - 1)
-            x = W / 2 - total / 2
+            x = cx0 - total / 2
             b["tiles"] = []
             for im, wd in zip(tiles, widths):
                 b["tiles"].append((im, x + wd / 2, t))
@@ -194,17 +231,17 @@ def render_pop(words, emph, outdir, W, H, fps, frames, font_path, accent, place=
                 bar = b["bar"]
                 if u < 1:
                     shown = bar.crop((0, 0, max(1, int(bar.width * (1 - (1 - u) ** 2))), bar.height))
-                    canvas.alpha_composite(shown, (int(W / 2 - bar.width / 2),
+                    canvas.alpha_composite(shown, (int(cx0 - bar.width / 2),
                                                    int(b["cy"] - bar.height / 2)))
                 else:
                     land = pop_scale(min(1.0, (now - b["t1"]) / POP), over=1.07, start=1.0)
-                    paste(canvas, bar, W / 2, b["cy"], land * es, ea)
+                    paste(canvas, bar, cx0, b["cy"], land * es, ea)
             else:
                 for im, cx, t0 in b["tiles"]:
                     u = (now - t0) / POP
                     if u <= 0:
                         continue
-                    paste(canvas, im, W / 2 + (cx - W / 2) * es, b["cy"],
+                    paste(canvas, im, cx0 + (cx - cx0) * es, b["cy"],
                           pop_scale(u) * es, min(1.0, u * 2.5) * ea)
         frame = soft_shadow(canvas, 12 * s)
         frame.alpha_composite(canvas)
@@ -214,13 +251,15 @@ def render_pop(words, emph, outdir, W, H, fps, frames, font_path, accent, place=
 
 # ------------------------------------------------------------------ sticker
 
-def render_sticker(words, emph, outdir, W, H, fps, frames, font_path, accent, place="top"):
-    s = min(W, H) / 720
+def render_sticker(words, emph, outdir, W, H, fps, frames, font_path, accent, place="top", scale=1.0):
+    band, side = spot(place, "top")
+    k = min(1.0, max(0.5, float(scale)))
+    s = min(W, H) / 720 * k
     tall = H > W
     emph = {e.lower() for e in emph}
     text = " ".join(words).lower()
     glyph = int(46 * s)
-    f = fit(font_path, text, W * (0.82 if tall else 0.60) - glyph, 60 * s, 24 * s)
+    f = fit(font_path, text, W * (0.82 if tall else 0.60) * k - glyph, 60 * s, 24 * s)
     bb = f.getbbox("hxg")
     cap = bb[3] - bb[1]
     padx, pady = int(cap * 0.75), int(cap * 0.55)
@@ -245,8 +284,8 @@ def render_sticker(words, emph, outdir, W, H, fps, frames, font_path, accent, pl
         d.text((x, pady - bb[1]), wd.lower(), font=f, fill=INK)
         x += wl + space
     card = card.rotate(2.5, resample=Image.BICUBIC, expand=True)
-    cx, cy = W / 2, H * (0.13 if tall else 0.17)
-    if place == "bottom":
+    cx, cy = anchor_x(W, card.width, side), H * (0.13 if tall else 0.17)
+    if band == "bottom":
         cy = H * (0.80 if tall else 0.83)
 
     out = Path(outdir)

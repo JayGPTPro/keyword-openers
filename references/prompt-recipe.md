@@ -9,7 +9,7 @@ From `look-sheet.jpg`, write down four things about the seller's video and reuse
 every prompt word for word:
 
 - **Place and time:** "a stone fire pit in a field at dusk"
-- **Light:** "the campfire is the only light, warm amber on faces, deep black beyond it"
+- **Light:** "the campfire is the only light, warm amber on faces, dark beyond it with detail still visible"
 - **People:** "a father in his thirties and a boy of about seven" (or "no people, hands only")
 - **Camera feel:** "handheld weight, shallow depth of field, 35mm"
 
@@ -44,7 +44,8 @@ unmistakable within the first second, with the product in use.] [One small human
 a look, a laugh, a reaction.]
 
 COMPOSITION: The subject sits in [the upper / the lower] two thirds of the frame. The
-[bottom / top] third of the frame stays darker and uncluttered.
+[bottom / top] third of the frame stays darker and uncluttered: no face, no hand and
+none of [the keyword's thing] in it.
 
 LIGHT: [The video's light, word for word.]
 
@@ -60,8 +61,12 @@ keyword].
 ```
 
 The COMPOSITION line is there for the title, which is large. It needs one calm band, the
-bottom third or the top third. Pick the one the scene can spare and say so; the build
-finds the calmer band by itself and puts the title there.
+bottom third or the top third. Pick the one the scene can spare, say so, and write the
+same band into that variant's `"place"` in plan.json (`"top"` or `"bottom"`). Left on
+`auto` the build only guesses, and by firelight it guesses the band with the faces.
+
+Keep the scene about as bright as the video's own first shot. The ad plays small; an
+opening that is mostly black disappears next to the results around it.
 
 ## Worked example
 
@@ -79,10 +84,11 @@ dog on its two-prong fork, the skins just starting to blister. The boy looks up 
 father and grins.
 
 COMPOSITION: The two of them, the hot dogs and the fire sit in the lower two thirds of
-the frame. The top third of the frame is dark sky and treeline, uncluttered.
+the frame. The top third of the frame is dusk sky and treeline, uncluttered: no face, no
+hand and no hot dog in it.
 
-LIGHT: The campfire is the only light: warm amber on faces and steel, deep true black
-beyond the fire ring, a last cool blue of dusk above the treeline.
+LIGHT: The campfire is the only light: warm amber on faces and steel, the field beyond
+the fire ring dark but still readable, a last cool blue of dusk above the treeline.
 
 SOUND: Fire crackle, a faint sizzle, quiet evening insects. No music, no speech.
 
@@ -111,4 +117,5 @@ Fix the sentence that caused it, not the whole prompt:
   and bent.
 - The keyword's thing is not readable in the first second: move it to the first sentence
   of SUBJECT and start the camera closer.
-- Subject under the title: set `place` in plan.json (free), or restate COMPOSITION and regenerate.
+- Subject under the title: set `place` and, if needed, `title_scale` in plan.json (free), or
+  restate COMPOSITION and regenerate.

@@ -31,6 +31,7 @@ import sys
 import tempfile
 from fractions import Fraction
 from pathlib import Path
+from string import Template
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
@@ -47,11 +48,15 @@ XFADE_FRAMES = 8
 def need_tools():
     for tool in ("ffmpeg", "ffprobe"):
         if not shutil.which(tool):
-            raise SystemExit(f"{tool} is not installed. On a Mac: brew install ffmpeg")
+            raise SystemExit(f"{tool} is not installed. On a Mac: brew install ffmpeg. "
+                             f"On Windows: winget install --id Gyan.FFmpeg -e (then open a new terminal)")
 
 
 def run(cmd, binary=False):
-    r = subprocess.run([str(c) for c in cmd], capture_output=True, text=not binary)
+    # utf-8 by name: a Windows machine's own code page cannot read ffprobe's output for a
+    # folder or a file named in Hebrew, Russian or Japanese
+    r = subprocess.run([str(c) for c in cmd], capture_output=True,
+                       **({} if binary else {"encoding": "utf-8", "errors": "replace"}))
     if r.returncode:
         err = r.stderr if not binary else r.stderr.decode("utf8", "replace")
         lines = [ln for ln in err.splitlines() if ln.strip()]
@@ -192,7 +197,8 @@ def spec_notes(m):
         notes.append(f"size is {m['width']}x{m['height']}; Sponsored Brands video needs at least 1280x720")
     ratio = m["width"] / m["height"]
     if abs(ratio - 16 / 9) > 0.02 and abs(ratio - 9 / 16) > 0.02:
-        notes.append("the frame is neither 16:9 nor 9:16")
+        notes.append(f"the frame is {nearest_aspect(m['width'], m['height'])}, not 16:9; Sponsored Brands video "
+                     f"takes 16:9 only, so these versions are for other placements")
     if not 23.9 <= float(m["fps"]) <= 30.1:
         notes.append(f"frame rate is {float(m['fps']):.2f}; Amazon accepts 23.976 to 30")
     if float(m["fps"]) > 30.1:
@@ -210,6 +216,14 @@ def spec_notes(m):
 
 
 # ------------------------------------------------------------------ inspect
+
+ASPECTS = {"21:9": 21 / 9, "16:9": 16 / 9, "4:3": 4 / 3, "1:1": 1.0, "3:4": 3 / 4, "9:16": 9 / 16}
+
+
+def nearest_aspect(w, h):
+    """The frame's shape, as one of the shapes an opening can be generated in."""
+    return min(ASPECTS, key=lambda k: abs(ASPECTS[k] - w / h))
+
 
 def choose_window(cuts, limit=WINDOW_MAX):
     ok = [c for c in cuts if WINDOW_MIN <= c <= limit]
@@ -245,7 +259,7 @@ def cmd_inspect(a):
         "video": str(video), "width": m["width"], "height": m["height"],
         "fps": round(float(fps), 3), "duration": round(m["duration"], 3),
         "audio": m["audio"],
-        "aspect": "9:16" if tall else "16:9",
+        "aspect": nearest_aspect(m["width"], m["height"]),
         "cuts_first_20s": cuts,
         "window_seconds": window,
         "join": join,
@@ -321,10 +335,15 @@ def ink_cap_for(opener, fps_str, start_s, seconds):
     return int(np.clip(np.percentile(fr[:, 45:, :], 99.5), 175, 242))
 
 
-def calm_band(opener, start_s, seconds):
-    """Where the title covers less: the top band or the bottom band of the shot.
-    The busier band (brighter, more detail) is where the subject is, so the
-    title goes to the other one."""
+PLACES = ("auto", "top", "bottom", "top-left", "top-right", "bottom-left", "bottom-right")
+
+
+def calm_spot(opener, start_s, seconds):
+    """A first guess at where the title covers less. The busier band (brighter,
+    more detail) is where the subject is, so the title goes to the other one,
+    and to one side of it when that side is clearly calmer than the middle.
+    It is a guess from brightness and detail: it cannot tell a face from a
+    wall, which is why every check sheet shows what sits under the title."""
     fr = gray_frames(opener, "4", w=160, h=90, seconds=seconds, start=start_s)
     if not len(fr):
         return "bottom"
@@ -333,8 +352,14 @@ def calm_band(opener, start_s, seconds):
         gy, gx = np.gradient(band, axis=(1, 2))
         return float(band.mean() * 0.2 + (np.abs(gx) + np.abs(gy)).mean() * 8)
 
-    top, bottom = busy(fr[:, 6:34, 24:136]), busy(fr[:, 52:82, 24:136])
-    return "top" if top < bottom * 0.8 else "bottom"
+    rows = {"top": slice(6, 34), "bottom": slice(52, 82)}
+    cols = {"left": slice(6, 106), "right": slice(54, 154)}
+    top, bottom = busy(fr[:, rows["top"], 24:136]), busy(fr[:, rows["bottom"], 24:136])
+    band = "top" if top < bottom * 0.8 else "bottom"
+    mid = min(top, bottom) if band == "top" else bottom
+    side = {k: busy(fr[:, rows[band], c]) for k, c in cols.items()}
+    best = min(side, key=side.get)
+    return f"{band}-{best}" if side[best] < mid * 0.75 else band
 
 
 def build_one(film, m, v, plan, base, outdir, td):
@@ -378,18 +403,22 @@ def build_one(film, m, v, plan, base, outdir, td):
         text = v.get("title_text") or kw
         place = v.get("place") or plan.get("place") or "auto"
         if place == "auto":
-            place = calm_band(opener, S / float(fps), N / float(fps))
+            place = calm_spot(opener, S / float(fps), N / float(fps))
+        scale = float(v.get("title_scale") or plan.get("title_scale") or 1.0)
         emph = v.get("emphasis")
         emph = emph.split() if isinstance(emph, str) else (emph or plan["_emphasis"].get(kw, []))
         hit = plate.render(text, plates, (W, H), N,
                            plan.get("style", "pop"), plan.get("font", "bold"),
                            plate.hex_rgb(plan.get("accent") or "D8A848"), cap,
-                           fps=float(fps), emphasis=emph, place=place)
+                           fps=float(fps), emphasis=emph, place=place, scale=scale)
+        held = Image.open(plates / f"f{min(N - 1, int(N * 0.6)):04d}.png").split()[3].point(lambda a_: 255 if a_ > 128 else 0)
+        box = held.getbbox()
+        title_fits = bool(box) and box[0] > 2 and box[2] < W - 2
         P = int(round((hit or 0) * float(fps)))
         if hit and plan.get("punch", True) and 4 < P < N - 8:
             # the jump zoom: a hard cut to a tighter frame on the beat the title
             # lands. An instant cut reads as an edit; a slow push would not.
-            z = float(plan.get("punch_zoom", 1.15))
+            z = float(plan.get("punch_zoom", 1.08))
             zw, zh = int(W * z / 2 + 0.5) * 2, int(H * z / 2 + 0.5) * 2
             fc.append(f"[o0]split[pa][pb];[pa]trim=end_frame={P},setpts=PTS-STARTPTS[pa1];"
                       f"[pb]trim=start_frame={P},setpts=PTS-STARTPTS,scale={zw}:{zh},"
@@ -465,70 +494,150 @@ def build_one(film, m, v, plan, base, outdir, td):
     b_ = np.asarray(grab(film, window * 0.5, 160).convert("L"), dtype=np.float32)
     diff = float(np.abs(a_ - b_).mean())
     checks.append(("the opening is new", diff > 6.0, f"difference {diff:.1f}"))
+    if plan.get("title", True):
+        checks.append(("the title fits inside the frame", title_fits,
+                       "inside" if title_fits else 'it runs off the edge: give this keyword a shorter "title_text"'))
 
     tall = H > W
     tw = 270 if tall else 400
     ff = 1 / float(fps)
-    marks = [("start", 0.15), ("title in", window * 0.35), ("title held", window * 0.6),
-             ("last new frame", window - ff), ("first original frame", window + 0.5 * ff),
+    # a seek returns the first frame AT OR AFTER its time, so each side of the join is asked
+    # for from half a frame before it; asked for on the dot, 30 fps rounds onto the next frame
+    marks = [("start", 0.15), ("title held", window * 0.6),
+             ("last new frame", window - 1.5 * ff), ("first original frame", window - 0.5 * ff),
              ("after", window + 0.6)]
-    sheet([(f"{lab}  {t:.2f}s", grab(out, t, tw)) for lab, t in marks],
-          outdir / "check" / f"{name}-seam.jpg", cols=6 if tall else 3)
+    tiles = [(f"{lab}  {t:.2f}s", grab(out, t, tw)) for lab, t in marks]
+    if plan.get("title", True):
+        # the same moment with no title: is a face, or the thing the keyword names, under the words?
+        bare = grab(opener, S / float(fps) + window * 0.6, tw).resize(tiles[1][1].size)
+        tiles.insert(2, ("under the title", bare))
+    else:
+        tiles.insert(1, (f"opening  {window * 0.35:.2f}s", grab(out, window * 0.35, tw)))
+    sheet(tiles, outdir / "check" / f"{name}-seam.jpg", cols=6 if tall else 3)
 
     ok = all(c[1] for c in checks)
-    soft = min(om["width"], om["height"]) < 0.7 * min(W, H)
+    soft = min(om["width"], om["height"]) < 0.6 * min(W, H)
     return {"keyword": kw + (f" ({v['label']})" if v.get("label") else ""),
             "status": "ready" if ok else "check", "file": out.name,
             "join": "on the video's own cut" if on_cut else "dissolve",
             "window": round(window, 3),
+            **({"title_place": place} if plan.get("title", True) else {}),
             "seam_sheet": f"check/{name}-seam.jpg",
             **({"note": f"the opener is {om['width']}x{om['height']}, smaller than the video; it will look soft"} if soft else {}),
             "checks": [{"what": c[0], "ok": bool(c[1]), "detail": c[2]} for c in checks]}
 
 
-PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+PAGE = Template("""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Keyword openers</title><style>
-:root{{--bg:#f6f3ee;--ink:#1d1a17;--mute:#6f675e;--card:#fff;--line:#e4ddd2;--ok:#1f7a4d;--bad:#b3261e;--acc:#{accent}}}
-@media (prefers-color-scheme:dark){{:root{{--bg:#15130f;--ink:#f1ede6;--mute:#a39a8e;--card:#1e1b17;--line:#322d26;--ok:#59c08a;--bad:#ff8a80}}}}
-*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;padding:32px 16px 64px}}
-main{{max-width:1180px;margin:0 auto}}h1{{font-size:30px;margin:0 0 4px;letter-spacing:-.01em}}
-p.sub{{color:var(--mute);margin:0 0 28px;max-width:64ch}}
-.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax({minw}px,1fr));gap:20px}}
-.card{{background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden}}
-video{{display:block;width:100%;background:#000}}.b{{padding:14px 16px 16px}}
-.k{{font-weight:650;font-size:18px}}.k small{{font-weight:500;color:var(--mute);font-size:13px;margin-left:6px}}
-ul{{list-style:none;margin:8px 0 0;padding:0;font-size:14px;color:var(--mute)}}
-li.ok::before{{content:"\\2713  ";color:var(--ok)}}li.no::before{{content:"\\2717  ";color:var(--bad)}}
-.tag{{display:inline-block;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--mute);margin-bottom:4px}}
-.note{{font-size:14px;color:var(--bad);margin-top:6px}}
+:root{--bg:#f6f3ee;--ink:#1d1a17;--mute:#6f675e;--card:#fff;--line:#e4ddd2;--ok:#1f7a4d;--bad:#b3261e;--acc:#$accent}
+@media (prefers-color-scheme:dark){:root{--bg:#15130f;--ink:#f1ede6;--mute:#a39a8e;--card:#1e1b17;--line:#322d26;--ok:#59c08a;--bad:#ff8a80}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;padding:32px 16px 64px}
+main{max-width:1180px;margin:0 auto}h1{font-size:30px;margin:0 0 4px;letter-spacing:-.01em}
+h2{font-size:21px;margin:34px 0 4px;letter-spacing:-.01em}
+p.sub{color:var(--mute);margin:0 0 18px;max-width:64ch}
+.how{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 18px;max-width:70ch}
+.how ol{margin:6px 0 0;padding-left:20px}.how code{font-size:14px}
+.bar{color:var(--mute);font-size:14px;margin:18px 0 0}
+button{font:inherit;font-size:14px;padding:6px 12px;border-radius:9px;border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer;margin-right:8px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(${minw}px,1fr));gap:20px;margin-top:12px}
+body.small .grid{grid-template-columns:repeat(auto-fill,${small}px)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden}
+.card.up{border:2px solid var(--ok)}
+video{display:block;width:100%;background:#000}.b{padding:14px 16px 16px}
+.k{font-weight:650;font-size:17px;overflow-wrap:anywhere}
+ul{list-style:none;margin:8px 0 0;padding:0;font-size:14px;color:var(--mute)}
+li.ok::before{content:"\\2713  ";color:var(--ok)}li.no::before{content:"\\2717  ";color:var(--bad)}
+.tag{display:inline-block;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--mute);margin-bottom:4px}
+.tag.up{color:var(--ok);font-weight:700}
+.note{font-size:14px;color:var(--bad);margin-top:6px}
+body.small ul{display:none}
 </style></head><body><main>
-<h1>One video. {n} openings.</h1>
-<p class="sub">Each version is the same video with a new first {window:.1f} seconds of picture, matched to one keyword. The soundtrack is the original, untouched. Upload each version to the ad group that targets its keyword.</p>
-<div class="grid">{cards}</div></main></body></html>"""
+<h1>One video. $n $noun.</h1>
+<p class="sub">Each version is the same video with a new first $window seconds of picture, matched to one keyword. The soundtrack is the original, untouched.</p>
+<div class="how"><b>On Amazon</b><ol>
+<li>Make one ad group per keyword, on exact match.</li>
+<li>Give each ad group its keyword's file from the <code>upload</code> folder next to this page.</li>
+<li>Keep your original video running on the same keyword. It is what you compare against.</li>
+<li>After 1 to 2 weeks, keep the openings with the higher click-through rate.</li></ol></div>
+<p class="bar"><button id="sz" type="button">Show at the size a shopper sees</button>The videos here play without sound, the way they do in search results.</p>
+$body
+</main><script>
+document.getElementById("sz").onclick=function(){var s=document.body.classList.toggle("small");this.textContent=s?"Show large":"Show at the size a shopper sees"};
+</script></body></html>""")
+
+
+def hand_over(plan, results, outdir):
+    """One file per keyword in out/upload/, named by the keyword: the take marked
+    "pick", or the only take that is ready. A keyword with several ready takes and
+    no pick gets no file, so nothing is uploaded by accident."""
+    up = outdir / "upload"
+    groups = {}
+    for v, r in zip(plan["variants"], results):
+        r["kw"], r["label"] = v["keyword"], v.get("label")
+        groups.setdefault(v["keyword"], []).append((v, r))
+    chosen, undecided, written = 0, [], set()
+    for kw, items in groups.items():
+        ready = [(v, r) for v, r in items if r["status"] == "ready"]
+        marked = [x for x in ready if x[0].get("pick") is True]
+        one = marked[0] if marked else (ready[0] if len(ready) == 1 else None)
+        dest = up / f"{slug(kw)}.mp4"
+        if one:
+            up.mkdir(exist_ok=True)
+            shutil.copyfile(outdir / one[1]["file"], dest)
+            one[1]["upload"] = f"upload/{dest.name}"
+            written.add(dest.name)
+            chosen += 1
+        elif len(ready) > 1:
+            undecided.append(kw)
+    if up.is_dir():
+        # the folder is what gets uploaded: a keyword that was dropped, renamed or lost its
+        # pick must not leave its old video behind
+        for old in up.glob("*.mp4"):
+            if old.name not in written:
+                old.unlink()
+    return chosen, undecided
 
 
 def write_page(outdir, film_rel, results, plan, m):
-    cards = [f'<div class="card"><video src="{html.escape(film_rel)}" controls preload="metadata" '
-             f'playsinline></video><div class="b"><span class="tag">Original</span>'
-             f'<div class="k">Your video</div></div></div>']
+    vid = 'controls muted loop playsinline preload="metadata"'
+    body = [f'<h2>Your video</h2><div class="grid"><div class="card"><video src="{html.escape(film_rel)}" {vid}>'
+            f'</video><div class="b"><span class="tag">Original</span>'
+            f'<div class="k">The one to compare against</div></div></div></div>']
+    groups = {}
     for r in results:
-        if r["status"] in ("waiting", "failed"):
-            cards.append(f'<div class="card"><div class="b"><span class="tag">{r["status"]}</span>'
-                         f'<div class="k">{html.escape(r["keyword"])}</div>'
-                         f'<div class="note">{html.escape(r["note"])}</div></div></div>')
-            continue
-        lis = "".join(f'<li class="{"ok" if c["ok"] else "no"}">{html.escape(c["what"])}</li>'
-                      for c in r["checks"])
-        cards.append(f'<div class="card"><video src="{html.escape(r["file"])}" controls '
-                     f'preload="metadata" playsinline></video><div class="b">'
-                     f'<span class="tag">Keyword</span><div class="k">{html.escape(r["keyword"])}'
-                     f'<small>{html.escape(r["file"])}</small></div><ul>{lis}</ul></div></div>')
-    n = sum(1 for r in results if r["status"] in ("ready", "check"))
-    (outdir / "index.html").write_text(encoding="utf-8", data=PAGE.format(
-        accent=plan.get("accent") or "D8A848", n=n, cards="".join(cards),
-        window=float(plan.get("window") or WINDOW_WISH),
-        minw=260 if m["height"] > m["width"] else 420))
+        groups.setdefault(r.get("kw", r["keyword"]), []).append(r)
+    for kw, items in groups.items():
+        body.append(f'<h2>{html.escape(kw)}</h2>')
+        ready = [r for r in items if r["status"] == "ready"]
+        if len(ready) > 1 and not any(r.get("upload") for r in items):
+            body.append('<div class="note">Several takes and none chosen yet. Say which one to use; '
+                        'it then lands in the upload folder.</div>')
+        cards = []
+        for r in items:
+            take = f'Take {html.escape(str(r["label"]))}' if r.get("label") else "Version"
+            if r["status"] in ("waiting", "failed"):
+                cards.append(f'<div class="card"><div class="b"><span class="tag">{take} &middot; {r["status"]}</span>'
+                             f'<div class="note">{html.escape(r["note"])}</div></div></div>')
+                continue
+            lis = "".join(f'<li class="{"ok" if c["ok"] else "no"}">{html.escape(c["what"])}</li>'
+                          for c in r["checks"])
+            note = f'<div class="note">{html.escape(r["note"])}</div>' if r.get("note") else ""
+            if r.get("upload"):
+                which = f' &middot; take {html.escape(str(r["label"]))}' if r.get("label") else ""
+                head = (f'<span class="tag up">Upload this one{which}</span>'
+                        f'<div class="k">{html.escape(r["upload"])}</div>')
+            else:
+                head = f'<span class="tag">{take}</span><div class="k">{html.escape(r["file"])}</div>'
+            cards.append(f'<div class="card{" up" if r.get("upload") else ""}"><video src="{html.escape(r["file"])}" '
+                         f'{vid}></video><div class="b">{head}{note}<ul>{lis}</ul></div></div>')
+        body.append(f'<div class="grid">{"".join(cards)}</div>')
+    n = len([k for k, items in groups.items() if any(r["status"] in ("ready", "check") for r in items)])
+    tall = m["height"] > m["width"]
+    (outdir / "index.html").write_text(encoding="utf-8", data=PAGE.substitute(
+        accent=plan.get("accent") or "D8A848", n=n, noun="keyword" if n == 1 else "keywords",
+        body="".join(body), window=f'{float(plan.get("window") or WINDOW_WISH):.1f}',
+        minw=260 if tall else 420, small=170 if tall else 300))
 
 
 STYLES = ("pop", "sticker", "kinetic", "line", "search")
@@ -543,11 +652,16 @@ def validate(plan):
         if value is not None and value not in allowed:
             bad.append(f'{where}"{key}" is {json.dumps(value)}; it can be: {", ".join(map(str, allowed))}')
 
+    def scale_ok(where, d):
+        ts = d.get("title_scale")
+        if ts is not None and (isinstance(ts, bool) or not isinstance(ts, (int, float)) or not 0.5 <= ts <= 1):
+            bad.append(f'{where}"title_scale" is {json.dumps(ts)}; it is a number from 0.5 (half size) to 1')
+
     if not plan.get("video"):
         bad.append('"video" is missing: the path of the seller\'s video')
     one_of("", "style", plan.get("style"), STYLES)
     one_of("", "font", plan.get("font"), FONTS_OK)
-    one_of("", "place", plan.get("place"), ("auto", "top", "bottom"))
+    one_of("", "place", plan.get("place"), PLACES)
     one_of("", "take", plan.get("take"), ("end", "start"))
     for key in ("title", "punch"):
         if key in plan and not isinstance(plan[key], bool):
@@ -570,7 +684,8 @@ def validate(plan):
     if not isinstance(vs, list) or not vs:
         bad.append('"variants" is empty: add one entry per keyword, each with "keyword" and "opener"')
         vs = []
-    names = {}
+    names, picked = {}, set()
+    scale_ok("", plan)
     for i, v in enumerate(vs, 1):
         w = f"variant {i}: "
         if not isinstance(v, dict) or not v.get("keyword"):
@@ -578,7 +693,14 @@ def validate(plan):
             continue
         if not v.get("opener"):
             bad.append(w + f'"opener" is missing for "{v["keyword"]}": the path of its opening clip')
-        one_of(w, "place", v.get("place"), ("auto", "top", "bottom"))
+        one_of(w, "place", v.get("place"), PLACES)
+        scale_ok(w, v)
+        if "pick" in v and not isinstance(v["pick"], bool):
+            bad.append(w + f'"pick" is {json.dumps(v["pick"])}; it can be: true, false (no quotes)')
+        if v.get("pick") is True:
+            if v["keyword"] in picked:
+                bad.append(w + f'"{v["keyword"]}" has two takes marked "pick"; mark one')
+            picked.add(v["keyword"])
         one_of(w, "take", v.get("take"), ("end", "start"))
         if "style" in v:
             bad.append(w + '"style" belongs at the top of plan.json, one style for all versions')
@@ -598,7 +720,7 @@ def cmd_build(a):
     if not plan_path.is_file():
         raise SystemExit(f"No plan.json at {plan_path}. Run inspect with --keywords first.")
     try:
-        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        plan = json.loads(plan_path.read_text(encoding="utf-8-sig"))
     except json.JSONDecodeError as e:
         raise SystemExit(f"plan.json is not valid JSON (line {e.lineno}: {e.msg}). A stray comma is the usual cause.")
     validate(plan)
@@ -614,9 +736,33 @@ def cmd_build(a):
     outdir = base / "out"
     outdir.mkdir(exist_ok=True)
 
+    # --only: rebuild the named keywords and keep every other version as it was built
+    only = [k.strip().lower() for k in (a.only or "").split(";") if k.strip()]
+    prev = {}
+    if only:
+        missing = [k for k in only if k not in {v["keyword"].lower() for v in plan["variants"]}]
+        if missing:
+            raise SystemExit("--only names a keyword that is not in plan.json: " + "; ".join(missing))
+        try:
+            prev = {(r.get("kw"), r.get("label")): r for r in
+                    json.loads((outdir / "report.json").read_text(encoding="utf-8"))["results"]}
+        except (OSError, ValueError, KeyError):
+            prev = {}
+
     results = []
     with tempfile.TemporaryDirectory() as td:
         for v in plan["variants"]:
+            if only and v["keyword"].lower() not in only:
+                r = prev.get((v["keyword"], v.get("label")))
+                if r and r.get("file") and (outdir / r["file"]).is_file():
+                    r.pop("upload", None)
+                    print(f"kept     {r['keyword']}")
+                else:
+                    r = {"keyword": v["keyword"] + (f" ({v['label']})" if v.get("label") else ""),
+                         "status": "waiting", "note": "not built yet: run build without --only"}
+                    print(f"waiting  {r['keyword']}  ({r['note']})")
+                results.append(r)
+                continue
             try:
                 r = build_one(film, m, v, plan, base, outdir, Path(td))
             except (RuntimeError, ValueError) as e:
@@ -636,11 +782,17 @@ def cmd_build(a):
         film_rel = str(Path("..") / film.relative_to(base))
     except ValueError:
         film_rel = film.as_uri()
+    chosen, undecided = hand_over(plan, results, outdir)
     write_page(outdir, film_rel, results, plan, m)
     (outdir / "report.json").write_text(encoding="utf-8", data=json.dumps(
         {"video": str(film), "window": plan["window"], "results": results}, indent=2))
     ready = sum(1 for r in results if r["status"] == "ready")
     print(f"\n{ready} of {len(results)} ready. Review page: {outdir / 'index.html'}")
+    if chosen:
+        print(f"To upload, one file per keyword ({chosen}): {outdir / 'upload'}")
+    if undecided:
+        print("Several takes and no pick yet for: " + "; ".join(undecided)
+              + '. Mark the chosen take "pick": true in plan.json and build again.')
     if any(r["status"] in ("check", "failed") for r in results):
         sys.exit(2)
     if not ready:
@@ -658,8 +810,14 @@ def main():
     i.set_defaults(fn=cmd_inspect)
     b = sub.add_parser("build")
     b.add_argument("plan")
+    b.add_argument("--only", help='rebuild only these keywords and keep the rest: "kw one; kw two"')
     b.set_defaults(fn=cmd_build)
     a = ap.parse_args()
+    for stream in (sys.stdout, sys.stderr):
+        # each line as it happens (a build can take minutes), and in utf-8 whatever the
+        # machine's own code page is
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     a.fn(a)
 
 

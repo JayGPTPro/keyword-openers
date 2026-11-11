@@ -9,10 +9,11 @@ version is the same length as the original and lands back on one of the video's 
 ## What you need
 
 - Claude Code
-- `ffmpeg` (Mac: `brew install ffmpeg`. Windows: `winget install ffmpeg`)
-- Python 3 with `numpy` and `Pillow` (`pip3 install numpy pillow`)
+- `ffmpeg` (Mac: `brew install ffmpeg`. Windows: `winget install --id Gyan.FFmpeg -e`)
+- Python 3 with `numpy` and `Pillow` (Mac: `pip3 install numpy pillow`. Windows:
+  `pip install numpy pillow`)
 - To have the opening scenes generated for you: the Genrupt MCP connected
-  (`claude mcp add --transport http genrupt https://genrupt.com/api/agent/mcp`).
+  (`claude mcp add --scope user --transport http genrupt https://genrupt.com/api/agent/mcp`).
   Without it, drop your own clips in and the skill does the rest.
 
 ## Install
@@ -32,8 +33,9 @@ Open Claude Code in the folder that holds your video and say:
 /keyword-openers my-video.mp4, ASIN B0XXXXXXXX, keywords: hot dog roasting sticks, vegetable roasting sticks, bbq roasting sticks
 ```
 
-You get a `keyword-openers/out/` folder with one mp4 per keyword and an `index.html` to
-review them side by side.
+You get `keyword-openers/out/upload/` with one mp4 per keyword, named by the keyword, and
+`keyword-openers/out/index.html` to review every version and see which file goes to which
+ad group.
 
 ## Fonts
 
