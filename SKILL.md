@@ -8,7 +8,8 @@ description: >
   file and builds a review page. Use when a seller has a product video and wants a version per keyword for
   Sponsored Brands video or any keyword-targeted video ad. Triggers: "keyword openers", "a video per keyword",
   "video for each keyword", "match my video to my keywords", "change the opening of my video", "PPC video
-  variants", "sponsored brands video per keyword", "/keyword-openers". NOT for making the full product video
+  variants", "sponsored brands video per keyword", "SB video per keyword", "video ad CTR hack",
+  "/keyword-openers". NOT for making the full product video
   itself: the seller brings a finished video.
 ---
 
@@ -34,15 +35,23 @@ what the shopper actually gets. That is why the opening is the part worth matchi
 
 Ask for all three in ONE message. If something is missing, ask once more, then go on.
 
+## Where things are
+
+The scripts are in this skill's own folder, not in the seller's folder. Below, `<skill>` is
+the folder this SKILL.md is in (usually `~/.claude/skills/keyword-openers`; on Windows
+`%USERPROFILE%\.claude\skills\keyword-openers`). `<workdir>` is a new folder next to the
+seller's video, named `keyword-openers`. Quote every path. On Windows the command is
+`python`, not `python3`.
+
 ## Step 1: read the video
 
 ```bash
-python3 scripts/openers.py inspect "<video>" "<workdir>" --keywords "kw one; kw two; kw three"
+python3 "<skill>/scripts/openers.py" inspect "<video>" "<workdir>" --keywords "kw one; kw two; kw three"
 ```
 
-`<workdir>` is a new folder next to the video, named `keyword-openers`. This writes
-`inspect.json`, `plan.json`, and two contact sheets. On Windows the command is `python`,
-not `python3`, here and in step 4.
+Separate the keywords with semicolons, so a keyword may hold a comma. This writes
+`inspect.json`, two contact sheets and, the first time, `plan.json`. An
+existing `plan.json` is never overwritten.
 
 **Open `opening-sheet.jpg` and look at it.** The tiles marked REPLACED are what will be
 gone. If a logo, a price, a claim or burned-in text sits there, tell the seller before
@@ -52,8 +61,9 @@ going on, and offer the earlier cut from `cuts_first_20s` (set `"window"` in `pl
 shot for this video: same time of day, same light, same kind of people, same lens feel.
 
 If `notes` in `inspect.json` is not empty, read the notes to the seller as they are. When
-a note asks for a re-export (a frame rate above 30, a variable frame rate, 96 kHz sound),
-offer to make the corrected copy yourself with ffmpeg and run `inspect` on the copy. When
+a note asks for a re-export (a frame rate above 30, a variable frame rate, 96 kHz sound,
+an HDR or 10-bit phone video), offer to make the corrected copy yourself with ffmpeg, delete `plan.json`, and run
+`inspect` on the copy, so the plan names the corrected video. When
 `aspect` is not `16:9`, say before any credits are spent that Sponsored Brands video takes
 16:9 only, and go on only if the seller wants the versions for another placement.
 
@@ -71,16 +81,16 @@ Product reference images: call `scrape_video_reference_images_from_asin` with th
 URLs. Use the first four.
 
 **A keyword that names a moving feature** (extendable, foldable, a lid that opens) needs a
-motion reference, or the model invents the mechanism: the first extendable opening made
-here grew by itself, like magic. First look for the feature in the seller's own video and
-cut those seconds out with ffmpeg. Only when the video does not show it, ask the seller
-for a short clip of the feature being used (3 to 8 seconds, at least 300 px tall; a phone
-clip is fine).
+motion reference, or the model invents the mechanism: without one, a stick extends by
+itself, like magic. First look for the feature in the seller's own video and cut those
+seconds out with ffmpeg. Only when the video does not show it, ask the seller for a short
+clip of the feature being used (3 to 8 seconds, at least 300 px tall; a phone clip or a
+customer review video from the listing is fine).
 Upload it with the `create_reference_asset_upload` capability (find it with
 `search_capabilities`, PUT the file to the URL it returns) and pass the `assetUrl` in
 `seedanceReferenceVideoUrls`. In the prompt say what to take from the clip (the motion)
 and what to ignore (its table, its light, its other objects). A reference video adds to
-the price, so include it in the price check.
+the price, so include it in the price check (`videoReferenceUrls` in the preset).
 
 Price before anything runs. Call `get_credit_balance_and_costs` with a `video_generation`
 preset (model `seedance_2_5_reference`, `720p`, the opener length, `videoCount` = number
@@ -96,14 +106,20 @@ at 480p is fine for judging a scene and too soft for an ad on a 1080p video.
 
 Then one `generate_video` call per keyword, all sent together:
 
-- `modelType: "fal_seedance"`, `seedanceModel`, `seedanceMode: "reference_to_video"`
+- `modelType: "fal_seedance"`, `seedanceMode: "reference_to_video"`
+- `seedanceModel`: the model you priced (`seedance_2_5_reference`, or
+  `seedance_2_mini_reference`)
 - `seedanceReferenceImageUrls`: the product images
 - `seedanceDuration`: `opener_seconds_to_generate`
 - `seedanceAspectRatio`: `aspect` from `inspect.json`
 - `seedanceResolution`: as priced
-- `asin`: the ASIN (the project is created or reused from it)
-- `promptEnhancement: "skip"` (the recipe already wrote the final prompt)
+- `asin`: the ASIN (the project is created or reused from it), and `amazonDomain` when
+  the listing is not on amazon.com
+- `promptEnhancement: "skip"`. The recipe already wrote the final prompt, so do not ask
+  the seller whether to enhance it; the answer here is always skip.
 - `sceneTitle`: the keyword
+- `seedanceGenerateAudio: false`, because the video keeps its own soundtrack. Leave it
+  on only when `opener_audio` in plan.json is a number.
 
 Wait with `wait_for_operation` / `get_video_generation_result`. Download each finished clip
 to the path its row in `plan.json` names:
@@ -112,8 +128,12 @@ to the path its row in `plan.json` names:
 curl -L -s -o "<workdir>/openers/<slug>.mp4" "<video url>"
 ```
 
+In Windows PowerShell write `curl.exe`; plain `curl` is a different command there.
+
 A generation that fails or is refused: report it in one line and keep going with the rest.
-Do not retry more than once without asking; a retry costs the same again. A scene that is
+A download that failed leaves a tiny file behind; `build` reports that keyword as failed
+and still builds the others.
+Never retry without asking; a retry costs the same again. A scene that is
 generated again is saved as a new take with its own `"label"` and file name, never over
 the clip that was already paid for.
 
@@ -123,7 +143,7 @@ tool) at the path in `plan.json` and you go straight to step 4.
 ## Step 4: build every version
 
 ```bash
-python3 scripts/openers.py build "<workdir>/plan.json"
+python3 "<skill>/scripts/openers.py" build "<workdir>/plan.json"
 ```
 
 No credits. A version takes about 4 seconds at 720p, 10 at 1080p and 25 at 4K, and each
@@ -132,6 +152,10 @@ one prints a line as it finishes. Run the command with a 10-minute timeout: the 
 draws the title, and checks the written file: same length as the original, soundtrack
 identical bit for bit, the rest of the picture untouched, the opening actually new, the
 title inside the frame.
+
+The command ends with exit code 2 when a version failed a check or could not be built,
+and 3 when no version is ready yet. The other versions and the review page are still
+written; read the `FAILED` lines and the notes it printed.
 
 To rebuild one keyword after a fix and keep the rest as they are, add
 `--only "hot dog roasting sticks"` (several: `"kw one; kw two"`).
@@ -157,7 +181,7 @@ prompt (ask first, it costs credits).
 Open `out/index.html` for the seller. Tell them, in this order:
 
 1. How many versions are ready, and that the files to upload are in `out/upload/`: one
-   file per keyword, named by the keyword.
+   file per keyword, named by the keyword (`hot-dog-roasting-sticks.mp4`).
 2. Anything you saw on a seam sheet that they should look at.
 3. How to use them: `references/amazon-upload.md` (one ad group per keyword, each with its
    own version). The page carries the same steps.
@@ -212,15 +236,17 @@ seller which take, set `"pick": true` on that variant, and build again.
   seller picks by looking. Offer a second take when a keyword matters; say what it costs.
   `"pick": true` on the chosen take copies it to `out/upload/<keyword>.mp4`.
 - A variant may carry `"title_text"` when the words on screen should differ from the
-  keyword, `"take"`, `"emphasis"` (the words to mark; by default the words the keywords do not
-  share, so "hot dog" in "hot dog roasting sticks"), `"place"`, `"title_scale"`, `"pick"`,
-  and its own `"window"`.
+  keyword, `"take"`, `"emphasis"` (the words to mark; by default the words most of the other
+  keywords do not have, so "hot dog" in "hot dog roasting sticks"), `"place"`, `"title_scale"`, `"pick"`,
+  its own `"window"`, and `"title": false` for no words on that one version.
+- Any other key is refused by name, so a typo never draws the wrong thing quietly. A key
+  that starts with `note` or `_` is yours to write in.
 
 ## When something is off
 
 `build` checks plan.json first and says in words what to fix. A keyword in letters the
 built-in fonts cannot draw (Hebrew, Chinese, Arabic) fails with that sentence: give the
-variant a `"title_text"` in Latin letters, or set `"title": false`. Emoji are dropped from
+variant a `"title_text"` in Latin letters, or set `"title": false` on that variant. Emoji are dropped from
 the title. A keyword of more than 5 words is drawn small; give it a shorter `"title_text"`.
 A video with no cut between 2 and 6 seconds gets a short dissolve instead of a cut.
 

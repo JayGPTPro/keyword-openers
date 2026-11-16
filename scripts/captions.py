@@ -45,7 +45,12 @@ def readable(accent):
     lum = .2126 * r + .7152 * g + .0722 * b
     if lum < 150:
         k = 150 / max(lum, 1)
-        return tuple(min(255, int(c * k + 18)) for c in accent)
+        accent = tuple(min(255, int(c * k + 18)) for c in accent)
+        for _ in range(12):   # a pure blue or red cannot get there by scaling: lift it toward white
+            r, g, b = accent
+            if .2126 * r + .7152 * g + .0722 * b >= 150:
+                break
+            accent = tuple(int(c + (255 - c) * 0.2) for c in accent)
     return accent
 
 
@@ -318,7 +323,7 @@ STYLES = {"pop": render_pop, "sticker": render_sticker}
 def drawable(text, font_path):
     """The keyword without emoji, or a plain error when the font has no letters for it."""
     import re as _re
-    text = _re.sub(r"[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0F\u200D]", "", text)
+    text = _re.sub(r"[\U0001F000-\U0001FAFF\u2190-\u21FF\u2300-\u23FF\u2600-\u27BF\u2B00-\u2BFF\u20E3\uFE0F\u200D]", "", text)
     text = " ".join(text.split())
     f = ImageFont.truetype(font_path, 40)
     hole = f.getmask("\uFFFF").getbbox(), bytes(f.getmask("\uFFFF"))

@@ -10,6 +10,8 @@ version is the same length as the original and lands back on one of the video's 
 
 - Claude Code
 - `ffmpeg` (Mac: `brew install ffmpeg`. Windows: `winget install --id Gyan.FFmpeg -e`)
+- Node.js, for the one-line install (Mac: `brew install node`. Windows:
+  `winget install --id OpenJS.NodeJS.LTS -e`)
 - Python 3 with `numpy` and `Pillow` (Mac: `pip3 install numpy pillow`. Windows:
   `pip install numpy pillow`)
 - To have the opening scenes generated for you: the Genrupt MCP connected
@@ -23,7 +25,7 @@ npx skills add JayGPTPro/keyword-openers -g
 ```
 
 The step-by-step setup guide (Claude Code, ffmpeg, Genrupt, first run, Amazon upload) is at
-[jaygptpro.com/keyword-openers/guide](https://jaygptpro.com/keyword-openers/guide/).
+[jaygptpro.com/keyword-openers](https://jaygptpro.com/keyword-openers/#setup).
 
 ## Use it
 
@@ -33,7 +35,8 @@ Open Claude Code in the folder that holds your video and say:
 /keyword-openers my-video.mp4, ASIN B0XXXXXXXX, keywords: hot dog roasting sticks, vegetable roasting sticks, bbq roasting sticks
 ```
 
-You get `keyword-openers/out/upload/` with one mp4 per keyword, named by the keyword, and
+You get `keyword-openers/out/upload/` with one mp4 per keyword, named by the keyword
+(`hot-dog-roasting-sticks.mp4`), and
 `keyword-openers/out/index.html` to review every version and see which file goes to which
 ad group.
 

@@ -15,7 +15,7 @@ original lands on an edit that was already there.
 
   openers.py build <workdir>/plan.json
       For every keyword whose opener clip exists: swap the opening picture,
-      draw the keyword title, check the result, and write out/<keyword>.mp4,
+      draw the keyword title, check the result, and write out/<keyword-with-dashes>.mp4,
       a seam sheet per version and out/index.html to review them all.
 
 Needs: ffmpeg + ffprobe on PATH, python3 with numpy and Pillow.
@@ -24,6 +24,7 @@ import argparse
 import hashlib
 import html
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -32,6 +33,7 @@ import tempfile
 from fractions import Fraction
 from pathlib import Path
 from string import Template
+from urllib.parse import quote
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
@@ -98,46 +100,67 @@ def info(path):
             "audio": a["codec_name"] if a else None,
             "rate": int(a.get("sample_rate") or 0) if a else 0,
             "vcodec": v["codec_name"], "vfr": vfr,
+            "pix_fmt": v.get("pix_fmt") or "", "transfer": v.get("color_transfer") or "",
             "vframes": int(v.get("nb_read_packets") or v.get("nb_frames") or 0)}
 
 
-def gray_frames(path, fps_str, w=160, h=90, seconds=None, start=None):
+def gray_frames(path, fps_str, w=160, h=90, seconds=None, start=None, colour=False):
     cmd = ["ffmpeg", "-v", "error"]
     if start is not None:
         cmd += ["-ss", f"{start:.4f}"]
     cmd += ["-i", path]
     if seconds is not None:
         cmd += ["-t", f"{seconds:.4f}"]
-    cmd += ["-vf", f"fps={fps_str},scale={w}:{h},format=gray", "-f", "rawvideo", "-"]
+    cmd += ["-vf", f"fps={fps_str},scale={w}:{h},format={'rgb24' if colour else 'gray'}", "-f", "rawvideo", "-"]
     raw = run(cmd, binary=True)
-    return np.frombuffer(raw, dtype=np.uint8).reshape(-1, h, w).astype(np.float32)
+    shape = (-1, h, w, 3) if colour else (-1, h, w)
+    return np.frombuffer(raw, dtype=np.uint8).reshape(shape).astype(np.float32)
 
 
 def find_cuts(path, fps, fps_str):
     """The video's own edits in its first 20 seconds, by frame difference."""
-    fr = gray_frames(path, fps_str, seconds=20)
+    return find_cuts_d(path, fps, fps_str)[0]
+
+
+def find_cuts_d(path, fps, fps_str):
+    """(cuts, d): d[i] is how much frame i+1 differs from frame i. In colour, so a cut
+    between two shots of the same brightness is seen. The threshold is taken from the
+    quiet frames (median and spread), so a video with many cuts does not hide its own."""
+    fr = gray_frames(path, fps_str, seconds=20, colour=True)
     if len(fr) < 3:
-        return []
-    d = np.abs(np.diff(fr, axis=0)).mean(axis=(1, 2))
-    thr = max(d.mean() + 3 * d.std(), 12.0)
+        return [], np.zeros(0)
+    d = np.abs(np.diff(fr, axis=0)).mean(axis=(1, 2, 3))
+    med = float(np.median(d))
+    mad = float(np.median(np.abs(d - med))) * 1.4826
+    thr = max(med + 8 * mad, 12.0)
     cuts, last = [], -99.0
     for i, v in enumerate(d):
         t = float((i + 1) / fps)
         if v > thr and t - last > 0.3:
             cuts.append(round(t, 4))
             last = t
-    return cuts
+    return cuts, d
 
 
 def grab(path, t, width=480):
+    """One frame at t. A time past the last picture (sound that runs longer, a rounding
+    at the very end) steps back until there is a frame."""
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
         tmp = Path(f.name)
     try:
-        run(["ffmpeg", "-y", "-v", "error", "-ss", f"{max(0, t):.4f}", "-i", path,
-             "-frames:v", 1, "-vf", f"scale={width}:-2", tmp])
-        return Image.open(tmp).convert("RGB").copy()
+        for back in (0.0, 0.25, 0.75, 1.5, 3.0):
+            run(["ffmpeg", "-y", "-v", "error", "-ss", f"{max(0, t - back):.4f}", "-i", path,
+                 "-frames:v", 1, "-vf", f"scale={width}:-2", tmp])
+            if tmp.stat().st_size:
+                return Image.open(tmp).convert("RGB").copy()
+            if t - back <= 0:
+                break
+        raise RuntimeError(f"no picture at {t:.2f}s in {Path(path).name}")
     finally:
-        tmp.unlink(missing_ok=True)
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def label_font(size=20):
@@ -197,7 +220,7 @@ def spec_notes(m):
         notes.append(f"size is {m['width']}x{m['height']}; Sponsored Brands video needs at least 1280x720")
     ratio = m["width"] / m["height"]
     if abs(ratio - 16 / 9) > 0.02 and abs(ratio - 9 / 16) > 0.02:
-        notes.append(f"the frame is {nearest_aspect(m['width'], m['height'])}, not 16:9; Sponsored Brands video "
+        notes.append(f"the frame is {m['width']}x{m['height']}, not 16:9; Sponsored Brands video "
                      f"takes 16:9 only, so these versions are for other placements")
     if not 23.9 <= float(m["fps"]) <= 30.1:
         notes.append(f"frame rate is {float(m['fps']):.2f}; Amazon accepts 23.976 to 30")
@@ -208,6 +231,9 @@ def spec_notes(m):
                      "constant frame rate first, or the picture and the sound drift apart")
     if m["width"] % 2 or m["height"] % 2:
         notes.append(f"the size {m['width']}x{m['height']} is odd; export it with even numbers")
+    if "10" in m.get("pix_fmt", "") or m.get("transfer") in ("smpte2084", "arib-std-b67"):
+        notes.append("the video is HDR or 10-bit (common for phone video); the versions are written as standard "
+                     "8-bit video, so its colours would shift. Convert the video to SDR first")
     if m["audio"] is None:
         notes.append("the video has no sound")
     elif m.get("rate") and m["rate"] > 48000:
@@ -270,7 +296,7 @@ def cmd_inspect(a):
     (work / "inspect.json").write_text(encoding="utf-8", data=json.dumps(out, indent=2))
 
     plan = work / "plan.json"
-    kws = []
+    kws, wrote_plan = [], False
     if a.keywords:
         kws = [k.strip() for k in re.split(r"[;\n]" if re.search(r"[;\n]", a.keywords) else r",", a.keywords) if k.strip()]
         seen = {}
@@ -292,11 +318,19 @@ def cmd_inspect(a):
         }, indent=2))
         (work / "openers").mkdir(exist_ok=True)
 
+        wrote_plan = True
+
     print(json.dumps(out, indent=2))
-    if kws and plan.exists() and not (work / "openers").is_dir():
-        pass
-    elif a.keywords and plan.exists() and plan.stat().st_mtime < (work / "inspect.json").stat().st_mtime - 1:
-        print("\nplan.json already exists and was kept as it is. Add new keywords to its variants list by hand, or delete it and run inspect again.")
+    if plan.exists() and not wrote_plan:
+        try:
+            old_video = json.loads(plan.read_text(encoding="utf-8-sig")).get("video")
+        except (OSError, ValueError):
+            old_video = None
+        if old_video and Path(old_video).expanduser().resolve() != video:
+            print(f"\nplan.json already exists and names ANOTHER video ({old_video}). It was kept as it is. "
+                  f"Delete plan.json and run inspect again, or build will use the old video.")
+        elif a.keywords:
+            print("\nplan.json already exists and was kept as it is. Add new keywords to its variants list by hand, or delete it and run inspect again.")
     if not a.keywords and not plan.exists():
         print('\nNo keywords given, so no plan.json was written. Run again with --keywords "first; second; third".')
     if join == "dissolve":
@@ -335,6 +369,7 @@ def ink_cap_for(opener, fps_str, start_s, seconds):
     return int(np.clip(np.percentile(fr[:, 45:, :], 99.5), 175, 242))
 
 
+MP4_AUDIO = ("aac", "mp3", "ac3", "eac3")
 PLACES = ("auto", "top", "bottom", "top-left", "top-right", "bottom-left", "bottom-right")
 
 
@@ -366,8 +401,9 @@ def build_one(film, m, v, plan, base, outdir, td):
     kw = v["keyword"]
     # several takes of one keyword: each carries a label and gets its own file
     name = slug(kw) + (f"-{slug(str(v['label']))}" if v.get("label") else "")
-    opener = (base / v["opener"]).expanduser() if not Path(v["opener"]).is_absolute() \
-        else Path(v["opener"])
+    opener = Path(v["opener"]).expanduser()
+    if not opener.is_absolute():
+        opener = base / opener
     if not opener.is_file():
         return {"keyword": kw, "status": "waiting", "note": f"no opener clip at {v['opener']}"}
 
@@ -377,12 +413,13 @@ def build_one(film, m, v, plan, base, outdir, td):
     op_secs = om["vframes"] / float(om["fps"]) if om["vframes"] else om["duration"]
     op_frames = int(op_secs * float(fps) + 1e-6)
     window = float(v.get("window") or plan.get("window") or WINDOW_WISH)
+    show_title = v.get("title", plan.get("title", True))
     N = int(round(window * fps))
     if op_frames < N:
         return {"keyword": kw, "status": "failed",
                 "note": f"the opener's picture is {op_secs:.2f}s long and the opening to replace is "
                         f"{window:.2f}s; the opener must be at least {window + 0.1:.1f}s, or pick an earlier cut"}
-    if abs(om["width"] / om["height"] - W / H) > 0.2:
+    if abs((om["width"] / om["height"]) / (W / H) - 1) > 0.12:
         return {"keyword": kw, "status": "failed",
                 "note": f"the opener is {om['width']}x{om['height']} and the video is "
                         f"{W}x{H}; generate the opener in the video's own aspect ratio"}
@@ -391,13 +428,18 @@ def build_one(film, m, v, plan, base, outdir, td):
     S = 0 if (v.get("take") or plan.get("take")) == "start" else op_frames - N
     cuts = plan.get("_cuts", [])
     on_cut = any(abs(c - window) < 1.5 / float(fps) for c in cuts)
+    d = plan.get("_diffs")
+    if not on_cut and d is not None and 1 <= N <= len(d):
+        # a window set by hand on a cut the detector did not list: look at that one frame
+        here, calm = float(d[N - 1]), float(np.median(d)) + 1e-6
+        on_cut = here >= 12.0 and here >= 4 * calm
 
     inputs = ["-i", film, "-i", opener]
     fc = [f"[1:v]fps={F},scale={W}:{H}:force_original_aspect_ratio=increase,"
           f"crop={W}:{H},setsar=1,trim=start_frame={S}:end_frame={S + N},"
           f"setpts=PTS-STARTPTS,format=yuv420p[o0]"]
     head = "o0"
-    if plan.get("title", True):
+    if show_title:
         plates = td / f"{name}-plates"
         cap = ink_cap_for(opener, F, S / float(fps), N / float(fps))
         text = v.get("title_text") or kw
@@ -411,7 +453,8 @@ def build_one(film, m, v, plan, base, outdir, td):
                            plan.get("style", "pop"), plan.get("font", "bold"),
                            plate.hex_rgb(plan.get("accent") or "D8A848"), cap,
                            fps=float(fps), emphasis=emph, place=place, scale=scale)
-        held = Image.open(plates / f"f{min(N - 1, int(N * 0.6)):04d}.png").split()[3].point(lambda a_: 255 if a_ > 128 else 0)
+        # above 200: the letters and their bar, never the soft shadow or the dark ramp under a quiet title
+        held = Image.open(plates / f"f{min(N - 1, int(N * 0.6)):04d}.png").split()[3].point(lambda a_: 255 if a_ > 200 else 0)
         box = held.getbbox()
         title_fits = bool(box) and box[0] > 2 and box[2] < W - 2
         P = int(round((hit or 0) * float(fps)))
@@ -426,6 +469,7 @@ def build_one(film, m, v, plan, base, outdir, td):
                       f"[pa1][pb1]concat=n=2:v=1:a=0[op]")
             head = "op"
         inputs += ["-framerate", F, "-i", plates / "f%04d.png"]
+        plan.setdefault("_plates", {})[name] = plates
         fc.append(f"[{head}][2:v]overlay=eof_action=pass:format=auto,format=yuv420p[o1]")
         head = "o1"
     if on_cut:
@@ -451,13 +495,18 @@ def build_one(film, m, v, plan, base, outdir, td):
     elif fold != "off" and om["audio"]:
         fa = (f"[1:a]atrim=start={S / float(fps):.5f}:duration={N / float(fps):.5f},"
               f"asetpts=PTS-STARTPTS,volume={float(fold)}dB,"
+              + (f"aresample={m['rate']}," if m.get("rate") else "") +
               f"apad=whole_dur={m['duration']:.4f}[oa];"
               # normalize=0 is load-bearing: amix otherwise halves every input,
               # and the video's own track must come out at its own level
               f"[0:a][oa]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]")
         run(["ffmpeg", "-y", "-v", "error", *inputs, "-filter_complex",
              ";".join(fc) + ";" + fa, "-map", "[v]", "-map", "[a]", *venc,
-             "-c:a", "aac", "-b:a", "192k", out])
+             "-c:a", "aac", "-b:a", "192k", *(["-ar", m["rate"]] if m.get("rate") else []), out])
+    elif m["audio"] not in MP4_AUDIO:
+        # a .mov's PCM (or another track an mp4 should not carry): encoded once, at a high rate
+        run(["ffmpeg", "-y", "-v", "error", *inputs, "-filter_complex", ";".join(fc),
+             "-map", "[v]", "-map", "0:a:0", *venc, "-c:a", "aac", "-b:a", "256k", out])
     else:
         try:
             run(["ffmpeg", "-y", "-v", "error", *inputs, "-filter_complex", ";".join(fc),
@@ -470,10 +519,11 @@ def build_one(film, m, v, plan, base, outdir, td):
     # ---- checks: measured on the file that was written, not on the plan
     got = info(out)
     checks = []
-    same_n = got["vframes"] == m["vframes"] if (got["vframes"] and m["vframes"] and not m.get("vfr")) \
-        else abs(got["duration"] - m["duration"]) <= 1.5 / float(fps)
+    # frame for frame, or (a video trimmed without re-encoding counts frames it never shows) to the same length
+    same_n = (bool(got["vframes"]) and got["vframes"] == m["vframes"]) \
+        or abs(got["duration"] - m["duration"]) <= 1.5 / float(fps)
     checks.append(("same length as the original", same_n,
-                   f"{got['vframes']} frames vs {m['vframes']}"))
+                   f"{got['duration']:.2f}s vs {m['duration']:.2f}s"))
     if m["audio"]:
         if copied:
             h1, h2 = audio_md5(out), audio_md5(film)
@@ -481,7 +531,8 @@ def build_one(film, m, v, plan, base, outdir, td):
             checks.append(("soundtrack identical to the original", same,
                            "bit for bit" if same else "differs"))
         else:
-            checks.append(("soundtrack kept", got["audio"] is not None, "re-encoded"))
+            checks.append(("soundtrack kept", got["audio"] is not None,
+                           "mixed with the opening's sound" if fold != "off" and om["audio"] else "re-encoded as AAC"))
     tail = m["duration"] - window
     diffs = []
     for frac_ in (0.08, 0.35, 0.65, 0.92):
@@ -494,7 +545,7 @@ def build_one(film, m, v, plan, base, outdir, td):
     b_ = np.asarray(grab(film, window * 0.5, 160).convert("L"), dtype=np.float32)
     diff = float(np.abs(a_ - b_).mean())
     checks.append(("the opening is new", diff > 6.0, f"difference {diff:.1f}"))
-    if plan.get("title", True):
+    if show_title:
         checks.append(("the title fits inside the frame", title_fits,
                        "inside" if title_fits else 'it runs off the edge: give this keyword a shorter "title_text"'))
 
@@ -507,7 +558,7 @@ def build_one(film, m, v, plan, base, outdir, td):
              ("last new frame", window - 1.5 * ff), ("first original frame", window - 0.5 * ff),
              ("after", window + 0.6)]
     tiles = [(f"{lab}  {t:.2f}s", grab(out, t, tw)) for lab, t in marks]
-    if plan.get("title", True):
+    if show_title:
         # the same moment with no title: is a face, or the thing the keyword names, under the words?
         bare = grab(opener, S / float(fps) + window * 0.6, tw).resize(tiles[1][1].size)
         tiles.insert(2, ("under the title", bare))
@@ -521,7 +572,7 @@ def build_one(film, m, v, plan, base, outdir, td):
             "status": "ready" if ok else "check", "file": out.name,
             "join": "on the video's own cut" if on_cut else "dissolve",
             "window": round(window, 3),
-            **({"title_place": place} if plan.get("title", True) else {}),
+            **({"title_place": place} if show_title else {}),
             "seam_sheet": f"check/{name}-seam.jpg",
             **({"note": f"the opener is {om['width']}x{om['height']}, smaller than the video; it will look soft"} if soft else {}),
             "checks": [{"what": c[0], "ok": bool(c[1]), "detail": c[2]} for c in checks]}
@@ -584,9 +635,13 @@ def hand_over(plan, results, outdir):
         dest = up / f"{slug(kw)}.mp4"
         if one:
             up.mkdir(exist_ok=True)
-            shutil.copyfile(outdir / one[1]["file"], dest)
-            one[1]["upload"] = f"upload/{dest.name}"
             written.add(dest.name)
+            try:
+                shutil.copyfile(outdir / one[1]["file"], dest)
+            except OSError:
+                one[1]["note"] = f"could not write upload/{dest.name}: close the video if it is open in a player, then build again"
+                continue
+            one[1]["upload"] = f"upload/{dest.name}"
             chosen += 1
         elif len(ready) > 1:
             undecided.append(kw)
@@ -595,7 +650,10 @@ def hand_over(plan, results, outdir):
         # pick must not leave its old video behind
         for old in up.glob("*.mp4"):
             if old.name not in written:
-                old.unlink()
+                try:
+                    old.unlink()
+                except OSError:
+                    print(f"could not remove the old upload/{old.name}: it is open in another program")
     return chosen, undecided
 
 
@@ -641,6 +699,10 @@ def write_page(outdir, film_rel, results, plan, m):
 
 
 STYLES = ("pop", "sticker", "kinetic", "line", "search")
+PLAN_KEYS = ("video", "window", "style", "font", "accent", "title", "opener_audio", "punch", "punch_zoom",
+             "place", "title_scale", "take", "variants")
+VARIANT_KEYS = ("keyword", "opener", "label", "pick", "place", "title_scale", "take", "title_text",
+                "emphasis", "window", "title")
 FONTS_OK = ("bold", "round", "serif", "clean")
 
 
@@ -657,7 +719,21 @@ def validate(plan):
         if ts is not None and (isinstance(ts, bool) or not isinstance(ts, (int, float)) or not 0.5 <= ts <= 1):
             bad.append(f'{where}"title_scale" is {json.dumps(ts)}; it is a number from 0.5 (half size) to 1')
 
-    if not plan.get("video"):
+    def known(where, d, allowed):
+        for key in d:
+            # a note to oneself is welcome: "note", "note_he", "comment", "_anything"
+            if key not in allowed and not str(key).lower().startswith(("_", "note", "comment")):
+                bad.append(f'{where}"{key}" is not a setting this knows; it can be: {", ".join(allowed)}')
+
+    def window_ok(where, d):
+        w_ = d.get("window")
+        if w_ is not None and (isinstance(w_, bool) or not isinstance(w_, (int, float)) or w_ < 1):
+            bad.append(f'{where}"window" is {json.dumps(w_)}; it is a number of seconds, 1 or more')
+
+    if not isinstance(plan, dict):
+        raise SystemExit("plan.json needs fixing:\n  - it must be one object in { }, as inspect wrote it")
+    known("", plan, PLAN_KEYS)
+    if not plan.get("video") or not isinstance(plan.get("video"), str):
         bad.append('"video" is missing: the path of the seller\'s video')
     one_of("", "style", plan.get("style"), STYLES)
     one_of("", "font", plan.get("font"), FONTS_OK)
@@ -678,21 +754,38 @@ def validate(plan):
             float(oa)
         except ValueError:
             bad.append(f'"opener_audio" is {json.dumps(plan["opener_audio"])}; it can be "off" or a number of dB such as -18')
-    if plan.get("window") is not None and not isinstance(plan["window"], (int, float)):
-        bad.append('"window" must be a number of seconds')
+    window_ok("", plan)
+    pz = plan.get("punch_zoom")
+    if pz is not None and (isinstance(pz, bool) or not isinstance(pz, (int, float)) or not 1 <= pz <= 1.5):
+        bad.append(f'"punch_zoom" is {json.dumps(pz)}; it is a number from 1 to 1.5')
     vs = plan.get("variants")
     if not isinstance(vs, list) or not vs:
         bad.append('"variants" is empty: add one entry per keyword, each with "keyword" and "opener"')
         vs = []
-    names, picked = {}, set()
+    names, picked, uploads = {}, set(), {}
     scale_ok("", plan)
     for i, v in enumerate(vs, 1):
         w = f"variant {i}: "
-        if not isinstance(v, dict) or not v.get("keyword"):
+        if not isinstance(v, dict) or not v.get("keyword") or not isinstance(v.get("keyword"), str):
             bad.append(w + '"keyword" is missing')
             continue
-        if not v.get("opener"):
+        known(w, v, VARIANT_KEYS)
+        if not v.get("opener") or not isinstance(v.get("opener"), str):
             bad.append(w + f'"opener" is missing for "{v["keyword"]}": the path of its opening clip')
+        window_ok(w, v)
+        if "title" in v and not isinstance(v["title"], bool):
+            bad.append(w + f'"title" is {json.dumps(v["title"])}; it can be: true, false (no quotes)')
+        if "title_text" in v and (not isinstance(v["title_text"], str) or not v["title_text"].strip()):
+            bad.append(w + '"title_text" must be words in quotes')
+        em = v.get("emphasis")
+        if em is not None and not (isinstance(em, str) or (isinstance(em, list) and all(isinstance(x, str) for x in em))):
+            bad.append(w + '"emphasis" is the words to mark, in quotes: "hot dog"')
+        if "label" in v and not isinstance(v["label"], (str, int)):
+            bad.append(w + '"label" is a short name in quotes, such as "A"')
+        other = uploads.setdefault(slug(v["keyword"]), v["keyword"])
+        if other != v["keyword"]:
+            bad.append(w + f'"{v["keyword"]}" and "{other}" would get the same file name in the upload folder; '
+                           f'spell them the same if they are one keyword')
         one_of(w, "place", v.get("place"), PLACES)
         scale_ok(w, v)
         if "pick" in v and not isinstance(v["pick"], bool):
@@ -719,8 +812,14 @@ def cmd_build(a):
         plan_path = plan_path / "plan.json"
     if not plan_path.is_file():
         raise SystemExit(f"No plan.json at {plan_path}. Run inspect with --keywords first.")
+    raw = plan_path.read_bytes()
     try:
-        plan = json.loads(plan_path.read_text(encoding="utf-8-sig"))
+        # Notepad and PowerShell's ">" save as UTF-16; read that too
+        text = raw.decode("utf-16") if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise SystemExit("plan.json is not saved as plain text (UTF-8). Save it again as UTF-8.")
+    try:
+        plan = json.loads(text)
     except json.JSONDecodeError as e:
         raise SystemExit(f"plan.json is not valid JSON (line {e.lineno}: {e.msg}). A stray comma is the usual cause.")
     validate(plan)
@@ -729,9 +828,17 @@ def cmd_build(a):
     if not film.is_absolute():
         film = base / film
     m = info(film)
-    plan["_cuts"] = find_cuts(film, m["fps"], m["fps_str"])
+    if m["width"] % 2 or m["height"] % 2:
+        raise SystemExit(f"The video is {m['width']}x{m['height']}. Its width and height must be even numbers; "
+                         f"export it again (for example at 1280x720) and run inspect on the new file.")
+    plan["_cuts"], plan["_diffs"] = find_cuts_d(film, m["fps"], m["fps_str"])
+    top = max(1.0, m["duration"] - 1.0)
     if not plan.get("window"):
-        plan["window"], _ = choose_window(plan["_cuts"])
+        plan["window"], _ = choose_window(plan["_cuts"], limit=min(WINDOW_MAX, top))
+    for where, d in [("", plan)] + [(f'variant {i}: ', v) for i, v in enumerate(plan["variants"], 1)]:
+        if d.get("window") and float(d["window"]) > top:
+            raise SystemExit(f'plan.json needs fixing:\n  - {where}"window" is {d["window"]} and the video is '
+                             f'{m["duration"]:.1f}s long; the opening can be at most {top:.1f}s')
     plan["_emphasis"] = emphasis_of([v["keyword"] for v in plan["variants"]])
     outdir = base / "out"
     outdir.mkdir(exist_ok=True)
@@ -765,8 +872,12 @@ def cmd_build(a):
                 continue
             try:
                 r = build_one(film, m, v, plan, base, outdir, Path(td))
-            except (RuntimeError, ValueError) as e:
-                r = {"keyword": v["keyword"], "status": "failed", "note": str(e)[:400]}
+            except (RuntimeError, ValueError, OSError, SystemExit) as e:
+                # one bad clip (a download that failed leaves an error page behind) never stops the rest
+                r = {"keyword": v["keyword"] + (f" ({v['label']})" if v.get("label") else ""),
+                     "status": "failed", "note": str(e)[:400]}
+            for used in plan.pop("_plates", {}).values():
+                shutil.rmtree(used, ignore_errors=True)   # 4K title frames are large; free them per version
             results.append(r)
             line = f"{r['status']:8} {r['keyword']}"
             if r.get("file"):
@@ -779,10 +890,20 @@ def cmd_build(a):
                     print(f"         FAILED: {c['what']} ({c['detail']})")
 
     try:
-        film_rel = str(Path("..") / film.relative_to(base))
-    except ValueError:
-        film_rel = film.as_uri()
+        # relative, so the page still finds the video when the folder is moved together with it
+        film_rel = quote(Path(os.path.relpath(film.resolve(), outdir.resolve())).as_posix())
+    except ValueError:   # another drive
+        film_rel = film.resolve().as_uri()
     chosen, undecided = hand_over(plan, results, outdir)
+    # a keyword that was dropped or renamed must not leave its old version behind
+    keep = {slug(v["keyword"]) + (f"-{slug(str(v['label']))}" if v.get("label") else "") for v in plan["variants"]}
+    for old in [*outdir.glob("*.mp4"), *(outdir / "check").glob("*-seam.jpg")]:
+        stem = old.stem[:-5] if old.name.endswith("-seam.jpg") else old.stem
+        if stem not in keep:
+            try:
+                old.unlink()
+            except OSError:
+                pass
     write_page(outdir, film_rel, results, plan, m)
     (outdir / "report.json").write_text(encoding="utf-8", data=json.dumps(
         {"video": str(film), "window": plan["window"], "results": results}, indent=2))

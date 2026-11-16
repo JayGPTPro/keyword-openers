@@ -56,7 +56,14 @@ class Type:
             if bb[2] - bb[0] <= max_w:
                 return f
             size -= 2
-        return self.font(floor)
+        # still too wide at the easy-to-read floor: keep shrinking, a small title beats one cut by the frame
+        while size > max(10, floor * 0.4):
+            f = self.font(size)
+            bb = f.getbbox(text)
+            if bb[2] - bb[0] <= max_w:
+                return f
+            size -= 1
+        return self.font(max(10, floor * 0.4))
 
 
 def ease_out(t):
@@ -204,6 +211,7 @@ def render(keyword, outdir, size, frames, style="pop", face="bold",
         return captions.STYLES[style](keyword.split(), emphasis, outdir, W, H, float(fps),
                                       frames, tp.path, accent,
                                       scale=scale, **({"place": place} if place else {}))
+    accent = captions.readable(accent)   # a dark accent (pure blue) would vanish on the dark ramp
     ink = (242, 242, 239)
     lum = .2126 * ink[0] + .7152 * ink[1] + .0722 * ink[2]
     if lum > ink_cap:
