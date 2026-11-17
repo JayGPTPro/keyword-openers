@@ -165,8 +165,11 @@ script cannot:
 
 1. The product in the new scene is the seller's product (shape, colour, count).
 2. The title is readable and does not sit on a face or on the thing the keyword names.
-   Compare the tile "title held" with the tile next to it, "under the title": the same
-   moment with no words. `auto` only guesses from brightness and detail; it cannot see a
+   The three "under the title" tiles show the same scene with no words, at the start,
+   middle and end of the time the title is on screen, with a yellow box where the title
+   sits. Look at all three: people move, and a corner that is clear at one moment can
+   hold a face a second later. A face or the keyword's thing inside the box in ANY of
+   the three is a fail. `auto` only guesses from brightness and detail; it cannot see a
    face, and by firelight the calm band is often where the faces are.
 3. The jump from "last new frame" to "first original frame" reads as a normal cut.
 
@@ -220,7 +223,9 @@ seller which take, set `"pick": true` on that variant, and build again.
 - `place` (`pop` and `sticker` only): `auto` (default) guesses the calmer band of the shot,
   top or bottom, and a side of it when that side is clearly calmer. `top`, `bottom`,
   `top-left`, `top-right`, `bottom-left` or `bottom-right` forces it. The three quiet
-  styles always sit at the bottom.
+  styles always sit at the bottom. When the new scene has people in it, do not leave it on
+  `auto`: you wrote the prompt, so you know where the people are. Start from the corner
+  away from them, often with `title_scale` 0.8, and then check the sheet as usual.
 - `title_scale` (`pop` and `sticker` only): 0.5 to 1. A smaller title, for a shot with no
   free spot at full size. For all versions at the top of the file, or on one variant.
 - `font`: `bold`, `round`, `serif`, `clean`. Match the type already in the video.

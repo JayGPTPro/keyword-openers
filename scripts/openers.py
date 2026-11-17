@@ -559,12 +559,33 @@ def build_one(film, m, v, plan, base, outdir, td):
              ("after", window + 0.6)]
     tiles = [(f"{lab}  {t:.2f}s", grab(out, t, tw)) for lab, t in marks]
     if show_title:
-        # the same moment with no title: is a face, or the thing the keyword names, under the words?
-        bare = grab(opener, S / float(fps) + window * 0.6, tw).resize(tiles[1][1].size)
-        tiles.insert(2, ("under the title", bare))
+        # the same moments with no title, the title's place outlined: is a face, or the thing the
+        # keyword names, under the words? People move while the title holds, so one moment is not
+        # enough: a corner clear at 60% can hold a face at 90% (Fred's kebab run, 17.11.2026).
+        boxes = {}
+        for i_ in range(0, N, 2):
+            a_ = Image.open(plates / f"f{i_:04d}.png").split()[3]
+            bb_ = a_.point(lambda x_: 255 if x_ > 200 else 0).getbbox()
+            if bb_:
+                boxes[i_] = bb_
+        seen = sorted(boxes) or [int(N * 0.6)]
+        lo, hi = seen[len(seen) // 10], seen[-1]   # skip the title's first tenth, while it is still landing
+        under = []
+        for i_ in (lo, (lo + hi) // 2, hi):
+            t_ = i_ / float(fps)
+            bare = grab(opener, S / float(fps) + t_, tw).resize(tiles[1][1].size).convert("RGB")
+            bb = boxes.get(i_)
+            if bb:
+                k_ = bare.width / float(W)
+                d_ = ImageDraw.Draw(bare)
+                for o_, c_ in ((2, (0, 0, 0)), (0, (255, 214, 0))):
+                    d_.rectangle([bb[0] * k_ - o_, bb[1] * k_ - o_, bb[2] * k_ + o_, bb[3] * k_ + o_],
+                                 outline=c_, width=3)
+            under.append((f"under the title  {t_:.2f}s", bare))
+        tiles[2:2] = under
     else:
         tiles.insert(1, (f"opening  {window * 0.35:.2f}s", grab(out, window * 0.35, tw)))
-    sheet(tiles, outdir / "check" / f"{name}-seam.jpg", cols=6 if tall else 3)
+    sheet(tiles, outdir / "check" / f"{name}-seam.jpg", cols=len(tiles) if tall else (len(tiles) + 1) // 2)
 
     ok = all(c[1] for c in checks)
     soft = min(om["width"], om["height"]) < 0.6 * min(W, H)

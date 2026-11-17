@@ -117,5 +117,5 @@ Fix the sentence that caused it, not the whole prompt:
   and bent.
 - The keyword's thing is not readable in the first second: move it to the first sentence
   of SUBJECT and start the camera closer.
-- Subject under the title: set `place` and, if needed, `title_scale` in plan.json (free), or
-  restate COMPOSITION and regenerate.
+- Subject under the title, in any of the three "under the title" tiles: set `place` and, if
+  needed, `title_scale` in plan.json (free), or restate COMPOSITION and regenerate.
